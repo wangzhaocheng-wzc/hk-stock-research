@@ -1,0 +1,6 @@
+interface:
+  display_name: "HK Stock Research"
+  short_description: "港股行情、估值、财报研究摘要工具"
+  default_prompt: "Use $hk-stock-research to research 00700.HK and summarize recent market signals."
+policy:
+  allow_implicit_invocation: true
