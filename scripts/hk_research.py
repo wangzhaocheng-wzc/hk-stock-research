@@ -141,6 +141,17 @@ def pct_change(values: pd.Series, periods: int) -> Optional[float]:
     return round((series.iloc[-1] / base - 1) * 100, 2)
 
 
+def latest_pct_change(values: pd.Series) -> Optional[float]:
+    """Return percentage change from first to last numeric item."""
+    series = pd.to_numeric(values, errors="coerce").dropna()
+    if len(series) < 2:
+        return None
+    base = series.iloc[0]
+    if base == 0:
+        return None
+    return round((series.iloc[-1] / base - 1) * 100, 2)
+
+
 def series_percentile(series: pd.Series, value: float) -> Optional[float]:
     """Return percentile rank of a value within a numeric series."""
     clean = pd.to_numeric(series, errors="coerce").dropna()
@@ -348,6 +359,139 @@ def fetch_southbound_holding(ak: Any, symbol: str, max_lookback_days: int = 7) -
     return FetchResult(name="southbound:holding", ok=False, error="; ".join(errors[-3:]) or "No holding data")
 
 
+def fetch_southbound_holding_trend(ak: Any, symbol: str, days: int = 20) -> FetchResult:
+    """Fetch recent southbound holding history for one HK stock."""
+    end = date.today()
+    start = end - timedelta(days=max(days * 2, days + 10))
+    result = safe_fetch(
+        "southbound:holding-trend",
+        ak.stock_hsgt_stock_statistics_em,
+        symbol="南向持股",
+        start_date=start.strftime("%Y%m%d"),
+        end_date=end.strftime("%Y%m%d"),
+    )
+    if not result.ok:
+        return result
+    df = result.data
+    if df is None or df.empty or "股票代码" not in df.columns:
+        return FetchResult(name="southbound:holding-trend", ok=False, error="No holding trend data")
+    matched = df[df["股票代码"].astype(str).str.zfill(5) == symbol].copy()
+    if matched.empty:
+        return FetchResult(name="southbound:holding-trend", ok=False, error=f"No holding trend row found for {symbol}")
+    date_col = "持股日期" if "持股日期" in matched.columns else matched.columns[0]
+    matched[date_col] = pd.to_datetime(matched[date_col], errors="coerce")
+    matched = matched.dropna(subset=[date_col]).sort_values(date_col).tail(days)
+    if matched.empty:
+        return FetchResult(name="southbound:holding-trend", ok=False, error="Holding trend rows have no dates")
+    quantity = pd.to_numeric(matched.get("持股数量", pd.Series(dtype=float)), errors="coerce")
+    market_value = pd.to_numeric(matched.get("持股市值", pd.Series(dtype=float)), errors="coerce")
+    ratio = pd.to_numeric(matched.get("持股数量占发行股百分比", pd.Series(dtype=float)), errors="coerce")
+    latest = matched.iloc[-1].to_dict()
+    first = matched.iloc[0].to_dict()
+    return FetchResult(
+        name="southbound:holding-trend",
+        ok=True,
+        data={
+            "days": int(days),
+            "start_date": str(first.get(date_col, ""))[:10],
+            "latest_date": str(latest.get(date_col, ""))[:10],
+            "latest": latest,
+            "holding_quantity_change_pct": latest_pct_change(quantity),
+            "holding_market_value_change_pct": latest_pct_change(market_value),
+            "holding_ratio_change_pct_point": (
+                round(float(ratio.dropna().iloc[-1] - ratio.dropna().iloc[0]), 4)
+                if len(ratio.dropna()) >= 2
+                else None
+            ),
+            "tail": matched.tail(5).to_dict(orient="records"),
+        },
+    )
+
+
+def fetch_index_context(ak: Any, stock_return_5d: Optional[float], stock_return_20d: Optional[float]) -> FetchResult:
+    """Fetch Hong Kong index performance and compare stock returns with benchmarks."""
+    indexes = {"HSI": "恒生指数", "HSCEI": "恒生中国企业指数", "HSTECH": "恒生科技指数"}
+    items = []
+    errors = []
+    for code, name in indexes.items():
+        result = safe_fetch(f"index:{code}", ak.stock_hk_index_daily_sina, symbol=code)
+        if not result.ok:
+            errors.append({"section": result.name, "error": result.error})
+            continue
+        df = result.data.copy()
+        if df.empty or "close" not in df.columns:
+            errors.append({"section": result.name, "error": "No index close data"})
+            continue
+        close = pd.to_numeric(df["close"], errors="coerce")
+        latest = df.iloc[-1].to_dict()
+        item = {
+            "code": code,
+            "name": name,
+            "latest_date": str(latest.get("date", "")),
+            "close": latest.get("close"),
+            "return_5d_pct": pct_change(close, 5),
+            "return_20d_pct": pct_change(close, 20),
+        }
+        if stock_return_5d is not None and item["return_5d_pct"] is not None:
+            item["stock_excess_5d_pct"] = round(stock_return_5d - item["return_5d_pct"], 2)
+        if stock_return_20d is not None and item["return_20d_pct"] is not None:
+            item["stock_excess_20d_pct"] = round(stock_return_20d - item["return_20d_pct"], 2)
+        items.append(item)
+    if not items:
+        return FetchResult(name="index:context", ok=False, error="; ".join(item["error"] for item in errors) or "No index data")
+    data: Dict[str, Any] = {"items": items}
+    if errors:
+        data["errors"] = errors
+    return FetchResult(name="index:context", ok=True, data=data)
+
+
+def fetch_short_selling(symbol: str, turnover: Optional[Any] = None) -> FetchResult:
+    """Fetch current HKEX short selling turnover text report for one stock."""
+    url = "https://www.hkex.com.hk/eng/stat/smstat/ssturnover/ncms/MSHTMAIN.HTM"
+    try:
+        response = requests.get(url, timeout=25, headers={"User-Agent": "Mozilla/5.0"})
+        response.raise_for_status()
+        text = response.text
+        report_title = ""
+        trade_date = ""
+        for line in text.splitlines():
+            clean = re.sub(r"\s+", " ", clean_text(line)).strip()
+            if not report_title and "Short Selling Turnover" in clean and "Total Value" not in clean:
+                report_title = clean
+            if "TRADING DATE" in clean:
+                trade_date = clean.split("TRADING DATE", 1)[-1].replace(":", "").strip()
+        target_code = str(int(symbol))
+        for line in text.splitlines():
+            match = re.match(r"^\s*(\d{1,5})\s+(.+?)\s+([\d,]+)\s+([\d,]+)\s*$", clean_text(line))
+            if not match or match.group(1) != target_code:
+                continue
+            short_shares = int(match.group(3).replace(",", ""))
+            short_turnover = int(match.group(4).replace(",", ""))
+            total_turnover = pd.to_numeric(pd.Series([turnover]), errors="coerce").dropna()
+            ratio = (
+                round(float(short_turnover / total_turnover.iloc[0] * 100), 2)
+                if not total_turnover.empty and total_turnover.iloc[0] != 0
+                else None
+            )
+            return FetchResult(
+                name="short-selling:hkex",
+                ok=True,
+                data={
+                    "source": url,
+                    "report_title": report_title,
+                    "trade_date": trade_date,
+                    "code": symbol,
+                    "name": match.group(2).strip(),
+                    "short_shares": short_shares,
+                    "short_turnover": short_turnover,
+                    "short_turnover_ratio_pct": ratio,
+                },
+            )
+        return FetchResult(name="short-selling:hkex", ok=False, error=f"No short selling row found for {symbol}")
+    except Exception as exc:  # noqa: BLE001 - report upstream failures.
+        return FetchResult(name="short-selling:hkex", ok=False, error=f"{type(exc).__name__}: {exc}")
+
+
 def parse_jsonp(text: str) -> Dict[str, Any]:
     """Parse HKEX JSONP responses."""
     match = re.search(r"^[^(]*\((.*)\);?\s*$", text.strip(), flags=re.DOTALL)
@@ -455,6 +599,50 @@ def fetch_hkex_announcements(symbol: str, days: int, limit: int) -> FetchResult:
         return FetchResult(name="hkex:announcements", ok=False, error=f"{type(exc).__name__}: {exc}")
 
 
+def summarize_announcements(announcements: Dict[str, Any]) -> Dict[str, Any]:
+    """Create structured corporate-action and risk summaries from HKEX announcement titles."""
+    items = announcements.get("items", []) if isinstance(announcements, dict) else []
+    category_keywords = {
+        "buyback": ["buyback", "repurchase"],
+        "monthly_return": ["monthly return"],
+        "financial_results": ["results", "financial", "annual report", "interim report"],
+        "general_meeting": ["agm", "annual general meeting", "notice of general meeting"],
+        "director_change": ["director", "appointment", "resignation"],
+        "financing_or_placing": ["placing", "subscription", "issue shares", "convertible"],
+        "dividend": ["dividend", "distribution"],
+    }
+    risk_keywords = {
+        "suspension": ["suspension", "trading halt"],
+        "profit_warning": ["profit warning", "loss warning"],
+        "litigation_or_investigation": ["litigation", "legal proceedings", "investigation"],
+        "regulatory": ["disciplinary", "sanction", "regulatory"],
+        "auditor_or_results_delay": ["auditor", "delay in publication", "inside information"],
+    }
+    categories = {name: [] for name in category_keywords}
+    risks = {name: [] for name in risk_keywords}
+    for item in items:
+        text = f"{item.get('title', '')} {item.get('category', '')}".lower()
+        compact = {
+            "date_time": item.get("date_time"),
+            "title": item.get("title"),
+            "category": item.get("category"),
+            "link": item.get("link"),
+        }
+        for name, keywords in category_keywords.items():
+            if any(keyword in text for keyword in keywords):
+                categories[name].append(compact)
+        for name, keywords in risk_keywords.items():
+            if any(keyword in text for keyword in keywords):
+                risks[name].append(compact)
+    return {
+        "category_counts": {name: len(rows) for name, rows in categories.items()},
+        "risk_counts": {name: len(rows) for name, rows in risks.items()},
+        "buybacks": categories["buyback"][:10],
+        "financing_or_placing": categories["financing_or_placing"][:10],
+        "risk_hits": {name: rows[:10] for name, rows in risks.items() if rows},
+    }
+
+
 def fetch_news(ak: Any, symbol: str, limit: int) -> FetchResult:
     """Fetch recent stock news from Eastmoney via AkShare."""
     result = safe_fetch("news:eastmoney", ak.stock_news_em, symbol=symbol)
@@ -516,6 +704,9 @@ def build_payload(
     announcement_days: int = 31,
     announcement_limit: int = 5,
     dividend_limit: int = 5,
+    southbound_trend_days: int = 20,
+    include_short_selling: bool = True,
+    include_index_context: bool = True,
 ) -> Dict[str, Any]:
     """Fetch and compute the research payload."""
     try:
@@ -544,6 +735,7 @@ def build_payload(
     announcements_result = fetch_hkex_announcements(symbol, announcement_days, announcement_limit)
     southbound_result = fetch_southbound(ak)
     southbound_holding_result = fetch_southbound_holding(ak, symbol)
+    southbound_trend_result = fetch_southbound_holding_trend(ak, symbol, southbound_trend_days)
 
     payload: Dict[str, Any] = {
         "symbol": symbol,
@@ -562,6 +754,9 @@ def build_payload(
             "announcements": "HKEXnews titleSearchServlet.do official listed company announcements",
             "southbound": "AkShare stock_hsgt_fund_flow_summary_em and stock_hsgt_hist_em / Eastmoney HSGT",
             "southbound_holding": "AkShare stock_hsgt_stock_statistics_em / Eastmoney southbound holding, usually T+1",
+            "southbound_holding_trend": "AkShare stock_hsgt_stock_statistics_em / Eastmoney recent southbound holding history",
+            "index_context": "AkShare stock_hk_index_daily_sina / Sina HK index history",
+            "short_selling": "HKEX Short Selling Turnover report, current main-board report",
         },
         "errors": [],
         "data_quality": {
@@ -626,6 +821,26 @@ def build_payload(
         payload["history_tail"] = hist.tail(5).to_dict(orient="records")
     else:
         payload["errors"].append({"section": history_result.name, "error": history_result.error})
+
+    if include_index_context:
+        index_result = fetch_index_context(
+            ak,
+            payload.get("price", {}).get("return_5d_pct"),
+            payload.get("price", {}).get("return_20d_pct"),
+        )
+        if index_result.ok:
+            payload["index_context"] = index_result.data
+            for item in index_result.data.get("errors", []):
+                payload["errors"].append(item)
+        else:
+            payload["errors"].append({"section": index_result.name, "error": index_result.error})
+
+    if include_short_selling:
+        short_result = fetch_short_selling(symbol, payload.get("price", {}).get("turnover"))
+        if short_result.ok:
+            payload["short_selling"] = short_result.data
+        else:
+            payload["errors"].append({"section": short_result.name, "error": short_result.error})
 
     if profile_result.ok and not profile_result.data.empty:
         row = profile_result.data.iloc[0].to_dict()
@@ -729,6 +944,7 @@ def build_payload(
 
     if announcements_result.ok:
         payload["announcements"] = announcements_result.data
+        payload["corporate_actions"] = summarize_announcements(announcements_result.data)
     else:
         payload["errors"].append({"section": announcements_result.name, "error": announcements_result.error})
 
@@ -743,6 +959,11 @@ def build_payload(
         payload["southbound_holding"] = southbound_holding_result.data
     else:
         payload["errors"].append({"section": southbound_holding_result.name, "error": southbound_holding_result.error})
+
+    if southbound_trend_result.ok:
+        payload["southbound_holding_trend"] = southbound_trend_result.data
+    else:
+        payload["errors"].append({"section": southbound_trend_result.name, "error": southbound_trend_result.error})
 
     return payload
 
@@ -919,6 +1140,33 @@ def render_information_brief(payload: Dict[str, Any]) -> List[str]:
     else:
         lines.append("- N/A")
 
+    corporate_actions = payload.get("corporate_actions", {})
+    if corporate_actions:
+        lines.extend(["", "### 公司行动雷达"])
+        category_counts = corporate_actions.get("category_counts", {})
+        risk_counts = corporate_actions.get("risk_counts", {})
+        lines.append(
+            "- 分类命中："
+            f"回购 {category_counts.get('buyback', 0)}｜"
+            f"业绩/财报 {category_counts.get('financial_results', 0)}｜"
+            f"融资/配售 {category_counts.get('financing_or_placing', 0)}｜"
+            f"董事变动 {category_counts.get('director_change', 0)}｜"
+            f"分红 {category_counts.get('dividend', 0)}"
+        )
+        risk_total = sum(int(value or 0) for value in risk_counts.values())
+        lines.append(f"- 风险类命中：{risk_total} 条。")
+        buybacks = corporate_actions.get("buybacks", [])
+        if buybacks:
+            latest = buybacks[0]
+            lines.append(
+                f"- 最新回购相关：{latest.get('date_time', 'N/A')}｜{latest.get('title', 'N/A')}｜{latest.get('link', 'N/A')}"
+            )
+        risk_hits = corporate_actions.get("risk_hits", {})
+        if risk_hits:
+            for name, rows in risk_hits.items():
+                latest = rows[0] if rows else {}
+                lines.append(f"- {name}：{latest.get('date_time', 'N/A')}｜{latest.get('title', 'N/A')}")
+
     lines.extend(
         [
             "",
@@ -956,6 +1204,59 @@ def render_information_brief(payload: Dict[str, Any]) -> List[str]:
             f"1日/5日/10日市值变化：{fmt_value(holding.get('持股市值变化-1日'))} / "
             f"{fmt_value(holding.get('持股市值变化-5日'))} / {fmt_value(holding.get('持股市值变化-10日'))}"
         )
+
+    holding_trend = payload.get("southbound_holding_trend", {})
+    if holding_trend:
+        lines.extend(["", "### 南向持仓趋势"])
+        lines.append("来源：东方财富南向持股每日个股统计；此处为最近可得日期的趋势对比，通常为 T+1 数据。")
+        latest = holding_trend.get("latest", {})
+        lines.append(
+            f"- 区间：{holding_trend.get('start_date', 'N/A')} 至 {holding_trend.get('latest_date', 'N/A')}｜"
+            f"最新持股数量：{fmt_value(latest.get('持股数量'))}｜"
+            f"最新持股市值：{fmt_value(latest.get('持股市值'))}｜"
+            f"占发行股比例：{fmt_value(latest.get('持股数量占发行股百分比'), '%')}"
+        )
+        lines.append(
+            f"- 区间变化：持股数量 {fmt_value(holding_trend.get('holding_quantity_change_pct'), '%')}｜"
+            f"持股市值 {fmt_value(holding_trend.get('holding_market_value_change_pct'), '%')}｜"
+            f"占比变化 {fmt_value(holding_trend.get('holding_ratio_change_pct_point'), 'pct')}"
+        )
+
+    return lines
+
+
+def render_market_context(payload: Dict[str, Any]) -> List[str]:
+    """Render market-relative strength and short-selling context."""
+    index_context = payload.get("index_context", {})
+    short_selling = payload.get("short_selling", {})
+    lines = ["", "## 市场相对强弱与交易情绪"]
+
+    lines.extend(["", "### 指数相对强弱"])
+    items = index_context.get("items", []) if isinstance(index_context, dict) else []
+    if items:
+        lines.append("来源：新浪港股指数历史行情，经 AkShare `stock_hk_index_daily_sina` 收集。")
+        for item in items:
+            lines.append(
+                f"- {item.get('name', item.get('code', 'N/A'))}（{item.get('latest_date', 'N/A')}）："
+                f"5日/20日涨跌幅 {fmt_value(item.get('return_5d_pct'), '%')} / {fmt_value(item.get('return_20d_pct'), '%')}；"
+                f"个股超额 {fmt_value(item.get('stock_excess_5d_pct'), '%')} / {fmt_value(item.get('stock_excess_20d_pct'), '%')}"
+            )
+    else:
+        lines.append("- N/A")
+
+    lines.extend(["", "### 沽空成交"])
+    if short_selling:
+        lines.append("来源：HKEX Short Selling Turnover 当前主板报告；盘中报告可能只覆盖至午间收市。")
+        lines.append(
+            f"- 报告：{short_selling.get('report_title', 'N/A')}｜交易日：{short_selling.get('trade_date', 'N/A')}"
+        )
+        lines.append(
+            f"- 沽空股数/金额：{fmt_value(short_selling.get('short_shares'))} / "
+            f"{fmt_value(short_selling.get('short_turnover'), ' HKD')}｜"
+            f"占当日成交额：{fmt_value(short_selling.get('short_turnover_ratio_pct'), '%')}"
+        )
+    else:
+        lines.append("- N/A")
 
     return lines
 
@@ -1074,6 +1375,7 @@ def render_markdown(payload: Dict[str, Any]) -> str:
     lines.extend(f"- {item}" for item in render_interpretation(payload))
 
     lines.extend(render_market_snapshot(payload))
+    lines.extend(render_market_context(payload))
     lines.extend(
         [
             "",
@@ -1171,6 +1473,9 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     parser.add_argument("--announcement-days", type=int, default=31, help="Days of HKEX announcements to search.")
     parser.add_argument("--announcement-limit", type=int, default=5, help="Number of HKEX announcement items to include.")
     parser.add_argument("--dividend-limit", type=int, default=5, help="Number of dividend/payout records to include.")
+    parser.add_argument("--southbound-trend-days", type=int, default=20, help="Recent southbound holding trend rows to inspect.")
+    parser.add_argument("--skip-short-selling", action="store_true", help="Skip HKEX short selling turnover lookup.")
+    parser.add_argument("--skip-index-context", action="store_true", help="Skip Hong Kong index-relative strength lookup.")
     parser.add_argument("--json", action="store_true", help="Print JSON payload instead of Markdown.")
     return parser.parse_args(argv)
 
@@ -1242,6 +1547,9 @@ def main(argv: List[str]) -> int:
                 announcement_days=args.announcement_days,
                 announcement_limit=args.announcement_limit,
                 dividend_limit=args.dividend_limit,
+                southbound_trend_days=args.southbound_trend_days,
+                include_short_selling=not args.skip_short_selling,
+                include_index_context=not args.skip_index_context,
             )
             strict_failed = strict_failed or any(
                 item.get("section") == "strict-date-check" for item in payload.get("errors", [])

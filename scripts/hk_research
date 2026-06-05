@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+if [[ -n "${HK_STOCK_PYTHON:-}" ]]; then
+  PYTHON_BIN="$HK_STOCK_PYTHON"
+else
+  PYTHON_BIN=""
+  for candidate in python3.12 python3.11 python3.10 python3.9 python3.8 python3; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      PYTHON_BIN="$candidate"
+      break
+    fi
+  done
+fi
+
+if [[ -z "$PYTHON_BIN" ]]; then
+  echo "Python 3.8+ is required, but no python3 interpreter was found." >&2
+  exit 127
+fi
+
+"$PYTHON_BIN" - <<'PY'
+import sys
+if sys.version_info < (3, 8):
+    raise SystemExit("Python 3.8+ is required. Set HK_STOCK_PYTHON to a newer interpreter.")
+PY
+
+exec "$PYTHON_BIN" "$SCRIPT_DIR/hk_research.py" "$@"

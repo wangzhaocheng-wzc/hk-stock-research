@@ -8,29 +8,40 @@
 - 批量生成多只港股报告，例如 `00700 03690 09988`。
 - 从股票池文件生成每日报告。
 - 输出实时/盘中快照、K 线趋势、估值分位、财务趋势、分红派息、HKEX 公告、新闻、南向资金和南向个股持仓。
+- 展示指数相对强弱、HKEX 沽空成交、南向持仓趋势和公司行动雷达。
 - 明确显示数据来源、数据日期和失败提示。
 - 不编造缺失数据；上游接口不可用时会显示 `N/A` 或错误原因。
 
 ## 安装到 OpenClaw / Codex
 
-把这个仓库克隆到本地 skills 目录：
+OpenClaw 服务器推荐安装到 `~/.openclaw/skills`：
 
 ```bash
-mkdir -p ~/.codex/skills
-git clone git@github.com:wangzhaocheng-wzc/hk-stock-research.git ~/.codex/skills/hk-stock-research
+mkdir -p ~/.openclaw/skills
+git clone git@github.com:wangzhaocheng-wzc/hk-stock-research.git ~/.openclaw/skills/hk-stock-research
+python3.11 -m pip install --user -r ~/.openclaw/skills/hk-stock-research/requirements.txt
 ```
 
 如果使用 HTTPS：
 
 ```bash
-mkdir -p ~/.codex/skills
-git clone https://github.com/wangzhaocheng-wzc/hk-stock-research.git ~/.codex/skills/hk-stock-research
+mkdir -p ~/.openclaw/skills
+git clone https://github.com/wangzhaocheng-wzc/hk-stock-research.git ~/.openclaw/skills/hk-stock-research
+python3.11 -m pip install --user -r ~/.openclaw/skills/hk-stock-research/requirements.txt
 ```
 
-安装 Python 依赖：
+Codex 本机使用时，可以安装到 `~/.codex/skills`：
 
 ```bash
-python3 -m pip install --user akshare pandas requests
+mkdir -p ~/.codex/skills
+git clone https://github.com/wangzhaocheng-wzc/hk-stock-research.git ~/.codex/skills/hk-stock-research
+python3 -m pip install --user -r ~/.codex/skills/hk-stock-research/requirements.txt
+```
+
+运行脚本需要 Python 3.8+。如果服务器默认 `python3` 太旧，可以设置 `HK_STOCK_PYTHON`：
+
+```bash
+HK_STOCK_PYTHON=python3.11 ~/.openclaw/skills/hk-stock-research/scripts/hk_research 00700
 ```
 
 ## 自然语言调用示例
@@ -56,25 +67,25 @@ python3 -m pip install --user akshare pandas requests
 单只股票：
 
 ```bash
-python3 ~/.codex/skills/hk-stock-research/scripts/hk_research.py 00700
+~/.openclaw/skills/hk-stock-research/scripts/hk_research 00700
 ```
 
 多只股票：
 
 ```bash
-python3 ~/.codex/skills/hk-stock-research/scripts/hk_research.py 00700 03690 09988
+~/.openclaw/skills/hk-stock-research/scripts/hk_research 00700 03690 09988
 ```
 
 逗号分隔股票池：
 
 ```bash
-python3 ~/.codex/skills/hk-stock-research/scripts/hk_research.py --symbols 00700,03690,09988
+~/.openclaw/skills/hk-stock-research/scripts/hk_research --symbols 00700,03690,09988
 ```
 
 写入报告目录：
 
 ```bash
-python3 ~/.codex/skills/hk-stock-research/scripts/hk_research.py \
+~/.openclaw/skills/hk-stock-research/scripts/hk_research \
   --symbols 00700,03690,09988 \
   --output-dir ./reports
 ```
@@ -82,13 +93,13 @@ python3 ~/.codex/skills/hk-stock-research/scripts/hk_research.py \
 输出 JSON：
 
 ```bash
-python3 ~/.codex/skills/hk-stock-research/scripts/hk_research.py 00700 --json
+~/.openclaw/skills/hk-stock-research/scripts/hk_research 00700 --json
 ```
 
 要求行情必须为今天：
 
 ```bash
-python3 ~/.codex/skills/hk-stock-research/scripts/hk_research.py 00700 --require-today
+~/.openclaw/skills/hk-stock-research/scripts/hk_research 00700 --require-today
 ```
 
 如果最新行情日期不是今天，脚本会返回非 0 状态，并在报告里写明日期检查未通过。
@@ -177,7 +188,7 @@ python3 ~/.codex/skills/hk-stock-research/scripts/hk_research.py 00700 --require
 运行：
 
 ```bash
-python3 ~/.codex/skills/hk-stock-research/scripts/hk_research.py \
+~/.openclaw/skills/hk-stock-research/scripts/hk_research \
   --watchlist-file ./watchlist.txt \
   --output-dir ./reports
 ```
@@ -199,7 +210,7 @@ reports/
 每天 10 点生成股票池报告时，可以让 OpenClaw / Codex 创建定时任务，任务内容类似：
 
 ```bash
-python3 ~/.codex/skills/hk-stock-research/scripts/hk_research.py \
+~/.openclaw/skills/hk-stock-research/scripts/hk_research \
   --watchlist-file /path/to/watchlist.txt \
   --output-dir /path/to/reports/$(date +%Y-%m-%d)
 ```
@@ -221,6 +232,9 @@ python3 ~/.codex/skills/hk-stock-research/scripts/hk_research.py \
 | `--announcement-days 31` | 港交所公告检索天数 |
 | `--announcement-limit 5` | 港交所公告展示条数 |
 | `--dividend-limit 5` | 分红派息展示条数 |
+| `--southbound-trend-days 20` | 南向持仓趋势观察行数 |
+| `--skip-short-selling` | 跳过 HKEX 沽空成交查询 |
+| `--skip-index-context` | 跳过指数相对强弱查询 |
 | `--output-dir ./reports` | 写入报告目录 |
 | `--json` | 输出 JSON 而不是 Markdown |
 | `--require-today` | 要求最新行情日期必须为今天 |
@@ -236,8 +250,12 @@ python3 ~/.codex/skills/hk-stock-research/scripts/hk_research.py \
 - 分红派息：股息方案、除净日、派息日、股息率。
 - 公司相关新闻：发布时间、来源、标题、摘要和链接。
 - 港交所公告：公告时间、类型、PDF 链接、公告分类统计、风险关键词。
+- 公司行动雷达：回购、业绩/财报、融资/配售、董事变动、分红和风险类公告命中。
 - 南向资金：市场级港股通资金流。
 - 南向个股持仓：持股数量、持股市值、占发行股比例，通常为 T+1 数据。
+- 南向持仓趋势：最近可得日期的持股数量、市值和占比变化。
+- 指数相对强弱：个股相对恒指、国指、恒生科技指数的 5/20 日超额表现。
+- 沽空成交：HKEX 主板沽空成交股数、金额和占成交额比例。
 
 ## 数据来源与真实性说明
 
@@ -246,11 +264,16 @@ python3 ~/.codex/skills/hk-stock-research/scripts/hk_research.py \
 - AkShare 聚合的东方财富、百度股市通、新浪港股等公开数据。
 - HKEXnews 官方公告标题搜索。
 - 东方财富沪深港通资金流和南向持股统计。
+- HKEX Short Selling Turnover 当前主板沽空报告。
+- 新浪港股指数历史行情。
 
 重要限制：
 
 - 免费公开行情源可能延迟或临时不可用。
 - 港交所公告目前展示标题、分类、时间和 PDF 链接，不自动解析 PDF 正文。
 - 南向资金分为市场级资金流和个股持仓；市场级资金流不能解释为个股专属资金流。
+- 南向持仓趋势通常为延迟数据，不能解释为实时买卖流。
+- HKEX 沽空报告在盘中可能只覆盖至午间收市，需看报告标题和交易日。
+- 指数相对强弱只做表现对比，不代表因果归因。
 - 数据用于研究辅助，不构成投资建议或交易指令。
 - 脚本不会编造数据；拿不到的数据会显示 `N/A` 或错误提示。
