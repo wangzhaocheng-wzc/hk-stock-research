@@ -170,6 +170,188 @@ def latest_number(df: pd.DataFrame, column: str) -> Optional[float]:
     return float(series.iloc[-1])
 
 
+def safe_round(value: Any, digits: int = 2) -> Optional[float]:
+    """Round a numeric value if it is finite."""
+    number = pd.to_numeric(pd.Series([value]), errors="coerce").dropna()
+    if number.empty:
+        return None
+    return round(float(number.iloc[0]), digits)
+
+
+def score_label(score: Optional[int]) -> str:
+    """Convert a technical score into a readable state label."""
+    if score is None:
+        return "数据不足"
+    if score >= 85:
+        return "强势"
+    if score >= 70:
+        return "偏强"
+    if score >= 50:
+        return "中性"
+    if score >= 35:
+        return "偏弱"
+    return "弱势"
+
+
+def rsi_state(value: Optional[float]) -> str:
+    """Describe a 14-period RSI value."""
+    if value is None:
+        return "N/A"
+    if value >= 70:
+        return "偏热"
+    if value <= 30:
+        return "偏冷"
+    if value >= 55:
+        return "偏强"
+    if value <= 45:
+        return "偏弱"
+    return "中性"
+
+
+def technical_snapshot(hist: pd.DataFrame) -> Dict[str, Any]:
+    """Compute a simple technical dashboard from daily OHLCV data."""
+    if hist.empty or "收盘" not in hist.columns:
+        return {}
+
+    close = pd.to_numeric(hist.get("收盘", pd.Series(dtype=float)), errors="coerce")
+    high = pd.to_numeric(hist.get("最高", pd.Series(dtype=float)), errors="coerce")
+    low = pd.to_numeric(hist.get("最低", pd.Series(dtype=float)), errors="coerce")
+    volume = pd.to_numeric(hist.get("成交量", pd.Series(dtype=float)), errors="coerce")
+    clean_close = close.dropna()
+    if len(clean_close) < 20:
+        return {"score": None, "state": "数据不足", "notes": ["日线数据少于20条，暂不生成技术面评分。"]}
+
+    latest_close = float(clean_close.iloc[-1])
+    ma_5 = clean_close.rolling(5).mean().iloc[-1] if len(clean_close) >= 5 else None
+    ma_10 = clean_close.rolling(10).mean().iloc[-1] if len(clean_close) >= 10 else None
+    ma_20 = clean_close.rolling(20).mean().iloc[-1] if len(clean_close) >= 20 else None
+    ma_60 = clean_close.rolling(60).mean().iloc[-1] if len(clean_close) >= 60 else None
+
+    ema_12 = close.ewm(span=12, adjust=False).mean()
+    ema_26 = close.ewm(span=26, adjust=False).mean()
+    dif = ema_12 - ema_26
+    dea = dif.ewm(span=9, adjust=False).mean()
+    macd_hist = (dif - dea) * 2
+
+    delta = close.diff()
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = (-delta.clip(upper=0)).rolling(14).mean()
+    rs = gain / loss.replace(0, pd.NA)
+    rsi_14 = 100 - (100 / (1 + rs))
+
+    support_20d = low.tail(20).min() if not low.tail(20).dropna().empty else None
+    resistance_20d = high.tail(20).max() if not high.tail(20).dropna().empty else None
+    volume_avg_20d = volume.tail(20).mean() if len(volume.dropna()) >= 20 else None
+    latest_volume = volume.dropna().iloc[-1] if not volume.dropna().empty else None
+    volume_ratio = (
+        (float(latest_volume) / float(volume_avg_20d) - 1) * 100
+        if latest_volume is not None and volume_avg_20d is not None and volume_avg_20d != 0
+        else None
+    )
+    volatility_20d = clean_close.pct_change().tail(20).std() * (252 ** 0.5) * 100 if len(clean_close) >= 21 else None
+
+    trend_score = 0
+    trend_notes: List[str] = []
+    if ma_5 is not None and ma_20 is not None:
+        if latest_close >= ma_5 >= ma_20:
+            trend_score += 30
+            trend_notes.append("收盘价站上MA5且MA5高于MA20。")
+        elif latest_close >= ma_20:
+            trend_score += 22
+            trend_notes.append("收盘价仍在MA20上方。")
+        elif latest_close >= ma_5:
+            trend_score += 14
+            trend_notes.append("收盘价站上MA5，但仍需观察MA20压力。")
+        else:
+            trend_score += 6
+            trend_notes.append("收盘价低于MA5，短线趋势偏弱。")
+    if ma_60 is not None:
+        trend_score += 10 if latest_close >= ma_60 else 2
+
+    momentum_score = 0
+    rsi_value = safe_round(rsi_14.iloc[-1]) if not rsi_14.dropna().empty else None
+    macd_value = safe_round(macd_hist.iloc[-1]) if not macd_hist.dropna().empty else None
+    macd_prev = safe_round(macd_hist.dropna().iloc[-2]) if len(macd_hist.dropna()) >= 2 else None
+    dif_value = safe_round(dif.iloc[-1]) if not dif.dropna().empty else None
+    dea_value = safe_round(dea.iloc[-1]) if not dea.dropna().empty else None
+    if macd_value is not None and dif_value is not None and dea_value is not None:
+        if dif_value > dea_value and macd_value > 0:
+            momentum_score += 25
+        elif dif_value > dea_value:
+            momentum_score += 18
+        elif macd_prev is not None and macd_value > macd_prev:
+            momentum_score += 12
+        else:
+            momentum_score += 5
+    if rsi_value is not None:
+        if 45 <= rsi_value <= 65:
+            momentum_score += 15
+        elif 35 <= rsi_value < 45 or 65 < rsi_value <= 75:
+            momentum_score += 10
+        else:
+            momentum_score += 4
+
+    volume_score = 0
+    if volume_ratio is not None:
+        if 10 <= volume_ratio <= 80 and latest_close >= (ma_20 if ma_20 is not None else latest_close):
+            volume_score = 15
+        elif -30 <= volume_ratio < 10:
+            volume_score = 10
+        elif volume_ratio > 80:
+            volume_score = 8
+        else:
+            volume_score = 5
+
+    risk_score = 5
+    if volatility_20d is not None:
+        if volatility_20d <= 35:
+            risk_score = 10
+        elif volatility_20d <= 60:
+            risk_score = 7
+        else:
+            risk_score = 3
+
+    total_score = int(max(0, min(100, round(trend_score + momentum_score + volume_score + risk_score))))
+    distance_to_support = (
+        (latest_close / float(support_20d) - 1) * 100 if support_20d is not None and support_20d != 0 else None
+    )
+    distance_to_resistance = (
+        (float(resistance_20d) / latest_close - 1) * 100 if resistance_20d is not None and latest_close != 0 else None
+    )
+
+    return {
+        "score": total_score,
+        "state": score_label(total_score),
+        "trend_score": int(trend_score),
+        "momentum_score": int(momentum_score),
+        "volume_score": int(volume_score),
+        "risk_score": int(risk_score),
+        "ma": {
+            "ma_5": safe_round(ma_5),
+            "ma_10": safe_round(ma_10),
+            "ma_20": safe_round(ma_20),
+            "ma_60": safe_round(ma_60),
+        },
+        "price_vs_ma20_pct": safe_round((latest_close / ma_20 - 1) * 100 if ma_20 else None),
+        "price_vs_ma60_pct": safe_round((latest_close / ma_60 - 1) * 100 if ma_60 else None),
+        "macd": {
+            "dif": dif_value,
+            "dea": dea_value,
+            "histogram": macd_value,
+            "histogram_change": safe_round(macd_value - macd_prev) if macd_value is not None and macd_prev is not None else None,
+        },
+        "rsi_14": rsi_value,
+        "rsi_state": rsi_state(rsi_value),
+        "volume_vs_20d_avg_pct": safe_round(volume_ratio),
+        "support_20d": safe_round(support_20d),
+        "resistance_20d": safe_round(resistance_20d),
+        "distance_to_support_pct": safe_round(distance_to_support),
+        "distance_to_resistance_pct": safe_round(distance_to_resistance),
+        "volatility_20d_pct": safe_round(volatility_20d),
+        "notes": trend_notes,
+    }
+
+
 def fmt_value(value: Any, suffix: str = "") -> str:
     """Format display values consistently."""
     if value is None:
@@ -807,6 +989,7 @@ def build_payload(
                 else None
             ),
         }
+        payload["technical"] = technical_snapshot(hist)
         latest_date = str(payload["price"]["latest_date"])
         payload["data_quality"]["price_date_matched"] = (
             latest_date == required_date.isoformat() if required_date else None
@@ -1022,8 +1205,222 @@ def render_interpretation(payload: Dict[str, Any]) -> List[str]:
     if pe is not None and pb is not None:
         lines.append(f"估值层面，TTM市盈率约{pe:.2f}倍，市净率约{pb:.2f}倍，适合继续和同业及自身历史区间对比。")
 
+    technical = payload.get("technical", {})
+    if technical.get("score") is not None:
+        lines.append(
+            f"技术面评分为{technical.get('score')}/100，状态为{technical.get('state')}；"
+            "该评分仅基于日线趋势、MACD/RSI、量能和波动率。"
+        )
+
     if not lines:
         lines.append("可用数据不足，建议先补充行情、估值或财报数据后再判断。")
+    return lines
+
+
+def first_item(items: Any) -> Dict[str, Any]:
+    """Return the first item from a list-like value."""
+    return items[0] if isinstance(items, list) and items else {}
+
+
+def render_executive_brief(payload: Dict[str, Any]) -> List[str]:
+    """Render a Feishu-friendly narrative summary before the detailed report."""
+    symbol = payload.get("symbol", "N/A")
+    company = payload.get("company", {})
+    price = payload.get("price", {})
+    realtime = payload.get("realtime_quote", {})
+    technical = payload.get("technical", {})
+    valuation = payload.get("valuation", {})
+    financials = payload.get("financial_highlights", {})
+    trend = payload.get("financial_trend", {})
+    news_items = payload.get("news", []) if isinstance(payload.get("news", []), list) else []
+    news = first_item(news_items)
+    announcements = payload.get("announcements", {})
+    announcement_items = announcements.get("items", []) if isinstance(announcements, dict) else []
+    latest_announcement = first_item(announcement_items)
+    corporate_actions = payload.get("corporate_actions", {})
+    category_counts = corporate_actions.get("category_counts", {}) if isinstance(corporate_actions, dict) else {}
+    risk_counts = corporate_actions.get("risk_counts", {}) if isinstance(corporate_actions, dict) else {}
+    short_selling = payload.get("short_selling", {})
+    index_context = payload.get("index_context", {})
+    index_items = index_context.get("items", []) if isinstance(index_context, dict) else []
+    holding = payload.get("southbound_holding", {})
+    holding_trend = payload.get("southbound_holding_trend", {})
+    southbound = payload.get("southbound", {})
+    southbound_summary = southbound.get("summary", []) if isinstance(southbound, dict) else []
+    southbound_history = southbound.get("history", []) if isinstance(southbound, dict) else []
+
+    name = company.get("name") or realtime.get("中文名称") or "N/A"
+    english_name = company.get("english_name") or realtime.get("英文名称") or "N/A"
+    pe = valuation.get("市盈率(TTM)", {}).get("value") if valuation else None
+    pb = valuation.get("市净率", {}).get("value") if valuation else None
+    market_cap = valuation.get("总市值", {}).get("value") if valuation else None
+    summary_lines = render_interpretation(payload)
+
+    lines = [
+        "",
+        "## 核心解析",
+        f"{symbol} 港股资讯已查到。",
+        "",
+        "### 核心快照",
+        f"- 公司：{name} / {english_name}",
+        f"- 代码：{symbol}.HK",
+        f"- 行业：{company.get('industry', 'N/A')}",
+        f"- 最新日线交易日：{price.get('latest_date', 'N/A')}",
+        f"- 收盘价：{fmt_value(price.get('close'), ' HKD')}",
+        f"- 当日涨跌幅：{fmt_value(price.get('change_pct'), '%')}",
+    ]
+    if realtime:
+        lines.extend(
+            [
+                f"- 盘中快照：{realtime.get('日期时间', 'N/A')}",
+                f"- 盘中现价：{fmt_value(realtime.get('最新价'), ' HKD')}",
+                f"- 盘中涨跌幅：{fmt_value(realtime.get('涨跌幅'), '%')}",
+                f"- 今日高/低：{fmt_value(realtime.get('最高'))} / {fmt_value(realtime.get('最低'))}",
+                f"- 今日成交额：{fmt_value(realtime.get('成交额'), ' 港元')}",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "### 走势与交易",
+            f"- 5日/20日/60日涨跌幅：{fmt_value(price.get('return_5d_pct'), '%')} / {fmt_value(price.get('return_20d_pct'), '%')} / {fmt_value(price.get('return_60d_pct'), '%')}",
+            f"- 当前收盘 {fmt_value(price.get('close'))}，20日均价 {fmt_value(price.get('ma_20'))}",
+            f"- 最新成交量较20日均量：{fmt_value(price.get('latest_volume_vs_20d_avg_pct'), '%')}",
+            f"- 20日年化波动率：{fmt_value(price.get('volatility_20d_pct'), '%')}",
+        ]
+    )
+    if technical:
+        lines.extend(
+            [
+                f"- 技术面评分：{fmt_value(technical.get('score'))}/100，状态：{technical.get('state', 'N/A')}",
+                f"- MA5/10/20/60：{fmt_value(technical.get('ma', {}).get('ma_5'))} / {fmt_value(technical.get('ma', {}).get('ma_10'))} / {fmt_value(technical.get('ma', {}).get('ma_20'))} / {fmt_value(technical.get('ma', {}).get('ma_60'))}",
+                f"- RSI14：{fmt_value(technical.get('rsi_14'))}，{technical.get('rsi_state', 'N/A')}",
+            ]
+        )
+    if summary_lines:
+        lines.append(f"- 结论：{summary_lines[0]}")
+
+    if index_items:
+        lines.extend(["", "### 相对指数表现"])
+        for item in index_items:
+            if item.get("code") in {"HSI", "HSTECH"}:
+                lines.append(
+                    f"- 相对{item.get('name', item.get('code'))}：5日超额 {fmt_value(item.get('stock_excess_5d_pct'), '%')}，"
+                    f"20日超额 {fmt_value(item.get('stock_excess_20d_pct'), '%')}"
+                )
+
+    if short_selling:
+        lines.extend(
+            [
+                "",
+                "### 沽空情况",
+                f"- HKEX 沽空报告：{short_selling.get('trade_date', 'N/A')}",
+                f"- 沽空金额：{fmt_value(short_selling.get('short_turnover'), ' HKD')}",
+                f"- 沽空成交占当日成交额：{fmt_value(short_selling.get('short_turnover_ratio_pct'), '%')}",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "### 估值与财务",
+            f"- 总市值：{fmt_value(market_cap)}",
+            f"- TTM 市盈率/市净率：{fmt_value(pe)} / {fmt_value(pb)}",
+            f"- 营业额：{fmt_value(financials.get('revenue'))}",
+            f"- 股东应占溢利：{fmt_value(financials.get('shareholder_profit'))}",
+            f"- 营收/股东应占溢利同比：{fmt_value(trend.get('revenue_yoy_pct'), '%')} / {fmt_value(trend.get('shareholder_profit_yoy_pct'), '%')}",
+            f"- 毛利率/经营利润率：{fmt_value(trend.get('gross_margin_pct'), '%')} / {fmt_value(trend.get('operating_margin_pct'), '%')}",
+        ]
+    )
+
+    lines.extend(["", "### 最新新闻"])
+    if news_items:
+        for index, item in enumerate(news_items[:3], start=1):
+            content = clean_text(item.get("新闻内容", ""))
+            brief = f"｜摘要：{content[:90]}..." if content else ""
+            lines.append(
+                f"{index}. {item.get('发布时间', 'N/A')}｜{item.get('文章来源', 'N/A')}｜"
+                f"{item.get('新闻标题', 'N/A')}{brief}"
+            )
+            if item.get("新闻链接"):
+                lines.append(f"   链接：{item.get('新闻链接')}")
+    else:
+        lines.append("- N/A")
+
+    lines.extend(["", "### 港交所公告"])
+    if latest_announcement:
+        risk_total = sum(int(value or 0) for value in risk_counts.values())
+        active_categories = [
+            f"{name} {count}条"
+            for name, count in [
+                ("回购", category_counts.get("buyback", 0)),
+                ("业绩/财报", category_counts.get("financial_results", 0)),
+                ("融资/配售", category_counts.get("financing_or_placing", 0)),
+                ("董事变动", category_counts.get("director_change", 0)),
+                ("分红", category_counts.get("dividend", 0)),
+            ]
+            if count
+        ]
+        lines.extend(
+            [
+                f"- 近 {announcements.get('days', 'N/A')} 天共 {announcements.get('record_count', 'N/A')} 条公告。",
+                f"- 分类命中：{'; '.join(active_categories) if active_categories else '未识别到重点分类'}",
+                f"- 风险关键词：{risk_total} 条。",
+            ]
+        )
+        for index, item in enumerate(announcement_items[:5], start=1):
+            lines.append(
+                f"{index}. {item.get('date_time', 'N/A')}｜{item.get('title', 'N/A')}｜"
+                f"{item.get('category', 'N/A')}｜{item.get('file_type', 'N/A')} {item.get('file_info', '')}"
+            )
+            if item.get("link"):
+                lines.append(f"   链接：{item.get('link')}")
+    else:
+        lines.append("- N/A")
+
+    lines.extend(["", "### 南向资金/持仓"])
+    if southbound_summary:
+        net_values = pd.to_numeric(pd.Series([item.get("成交净买额") for item in southbound_summary]), errors="coerce").dropna()
+        net_total = round(float(net_values.sum()), 2) if not net_values.empty else None
+        lines.append(f"- 市场级港股通净买额合计字段：{fmt_value(net_total)}（单位沿用上游接口）。")
+        for item in southbound_summary:
+            lines.append(
+                f"- {item.get('交易日', 'N/A')}｜{item.get('板块', 'N/A')}｜"
+                f"成交净买额：{fmt_value(item.get('成交净买额'))}｜"
+                f"相关指数：{item.get('相关指数', 'N/A')} {fmt_value(item.get('指数涨跌幅'), '%')}"
+            )
+    if southbound_history:
+        for channel in southbound_history:
+            latest = channel.get("latest", {})
+            lines.append(
+                f"- 历史最新：{channel.get('channel', 'N/A')}｜{latest.get('日期', 'N/A')}｜"
+                f"成交净买额：{fmt_value(latest.get('当日成交净买额'))}｜"
+                f"买入/卖出：{fmt_value(latest.get('买入成交额'))} / {fmt_value(latest.get('卖出成交额'))}"
+            )
+    if holding:
+        lines.append(
+            f"- 个股持仓：{holding.get('持股日期', 'N/A')}｜持股数量 {fmt_value(holding.get('持股数量'))}｜"
+            f"持股市值 {fmt_value(holding.get('持股市值'))}｜占发行股比例 {fmt_value(holding.get('持股数量占发行股百分比'), '%')}｜"
+            f"1日/5日/10日市值变化：{fmt_value(holding.get('持股市值变化-1日'))} / "
+            f"{fmt_value(holding.get('持股市值变化-5日'))} / {fmt_value(holding.get('持股市值变化-10日'))}"
+        )
+    if holding_trend:
+        lines.append(
+            f"- 近{holding_trend.get('days', 'N/A')}日趋势（{holding_trend.get('start_date', 'N/A')} 至 {holding_trend.get('latest_date', 'N/A')}）："
+            f"持股数量 {fmt_value(holding_trend.get('holding_quantity_change_pct'), '%')}｜"
+            f"持股市值 {fmt_value(holding_trend.get('holding_market_value_change_pct'), '%')}｜"
+            f"占比变化 {fmt_value(holding_trend.get('holding_ratio_change_pct_point'), 'pct')}"
+        )
+
+    final_observation = "；".join(str(item).rstrip("。") for item in summary_lines[:3]) if summary_lines else "数据不足，暂不做方向判断"
+    lines.extend(
+        [
+            "",
+            "### 一句话总结",
+            f"{name}当前状态：{final_observation}。以上为公开数据整理，不构成投资建议。",
+        ]
+    )
     return lines
 
 
@@ -1261,6 +1658,36 @@ def render_market_context(payload: Dict[str, Any]) -> List[str]:
     return lines
 
 
+def render_technical_dashboard(payload: Dict[str, Any]) -> List[str]:
+    """Render the technical indicator dashboard."""
+    technical = payload.get("technical", {})
+    lines = ["", "## 技术面看板"]
+    if not technical:
+        lines.append("- N/A")
+        return lines
+
+    ma = technical.get("ma", {})
+    macd = technical.get("macd", {})
+    notes = technical.get("notes", [])
+    lines.extend(
+        [
+            "来源：基于日线 OHLCV 计算；评分只用于研究辅助，不代表买卖建议。",
+            f"- 综合评分：{fmt_value(technical.get('score'))}/100｜状态：{technical.get('state', 'N/A')}",
+            f"- 子评分：趋势 {fmt_value(technical.get('trend_score'))}｜动量 {fmt_value(technical.get('momentum_score'))}｜量能 {fmt_value(technical.get('volume_score'))}｜波动 {fmt_value(technical.get('risk_score'))}",
+            f"- MA5/10/20/60：{fmt_value(ma.get('ma_5'))} / {fmt_value(ma.get('ma_10'))} / {fmt_value(ma.get('ma_20'))} / {fmt_value(ma.get('ma_60'))}",
+            f"- 价格相对 MA20/MA60：{fmt_value(technical.get('price_vs_ma20_pct'), '%')} / {fmt_value(technical.get('price_vs_ma60_pct'), '%')}",
+            f"- MACD DIF/DEA/柱：{fmt_value(macd.get('dif'))} / {fmt_value(macd.get('dea'))} / {fmt_value(macd.get('histogram'))}｜柱变化：{fmt_value(macd.get('histogram_change'))}",
+            f"- RSI14：{fmt_value(technical.get('rsi_14'))}｜状态：{technical.get('rsi_state', 'N/A')}",
+            f"- 成交量较20日均量：{fmt_value(technical.get('volume_vs_20d_avg_pct'), '%')}｜20日年化波动率：{fmt_value(technical.get('volatility_20d_pct'), '%')}",
+            f"- 20日支撑/压力：{fmt_value(technical.get('support_20d'))} / {fmt_value(technical.get('resistance_20d'))}",
+            f"- 距支撑/压力空间：{fmt_value(technical.get('distance_to_support_pct'), '%')} / {fmt_value(technical.get('distance_to_resistance_pct'), '%')}",
+        ]
+    )
+    if notes:
+        lines.append(f"- 观察：{' '.join(notes)}")
+    return lines
+
+
 def render_market_snapshot(payload: Dict[str, Any]) -> List[str]:
     """Render price, trading, security, financial, and dividend display items."""
     price = payload.get("price", {})
@@ -1368,13 +1795,14 @@ def render_markdown(payload: Dict[str, Any]) -> str:
         f"- 5日/20日均价：{fmt_value(price.get('ma_5'))} / {fmt_value(price.get('ma_20'))}",
         f"- 最新成交额：{fmt_value(price.get('turnover'))}",
         f"- 最新成交量较20日均量：{fmt_value(price.get('latest_volume_vs_20d_avg_pct'), '%')}",
-        "",
-        "## 初步解读",
     ]
 
+    lines.extend(render_executive_brief(payload))
+    lines.extend(["", "## 初步解读"])
     lines.extend(f"- {item}" for item in render_interpretation(payload))
 
     lines.extend(render_market_snapshot(payload))
+    lines.extend(render_technical_dashboard(payload))
     lines.extend(render_market_context(payload))
     lines.extend(
         [

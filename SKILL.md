@@ -67,11 +67,12 @@ If a company name cannot be confidently mapped to a HK code, ask for the code ra
 10. Fetch official HKEXnews announcements by resolving HKEX `stockId` and calling `titleSearchServlet.do`.
 11. Fetch market-level southbound Stock Connect data with `stock_hsgt_fund_flow_summary_em` and `stock_hsgt_hist_em`.
 12. Fetch stock-specific southbound holding trend with `stock_hsgt_stock_statistics_em`.
-13. Fetch HK index context with `stock_hk_index_daily_sina` and compare 5/20-day relative strength against HSI, HSCEI, and HSTECH.
-14. Fetch HKEX current short-selling turnover and compute short turnover as a percentage of the latest stock turnover when available.
-15. Structure HKEX announcement titles into company-action categories such as buybacks, financial results, financing/placing, director changes, dividends, and risk hits.
-16. Summarize market action, valuation, security profile, dividends, business profile, financial highlights, news, announcements, southbound flow, short selling, and index-relative strength.
-17. Clearly label data-source limitations and avoid giving personalized investment advice.
+13. Compute a technical dashboard from daily OHLCV data: MA5/10/20/60, MACD, RSI14, volume-vs-20D, 20D support/resistance, volatility, and a simple 0-100 technical state score.
+14. Fetch HK index context with `stock_hk_index_daily_sina` and compare 5/20-day relative strength against HSI, HSCEI, and HSTECH.
+15. Fetch HKEX current short-selling turnover and compute short turnover as a percentage of the latest stock turnover when available.
+16. Structure HKEX announcement titles into company-action categories such as buybacks, financial results, financing/placing, director changes, dividends, and risk hits.
+17. Summarize market action, technical dashboard, valuation, security profile, dividends, business profile, financial highlights, news, announcements, southbound flow, short selling, and index-relative strength.
+18. Clearly label data-source limitations and avoid giving personalized investment advice.
 
 ## Interpretation Guidelines
 
@@ -83,6 +84,7 @@ If a company name cannot be confidently mapped to a HK code, ask for the code ra
 - Southbound holding and holding trend are stock-specific, but usually delayed; do not describe them as real-time flow.
 - HKEX short-selling turnover can be a half-day report during market hours; preserve the report title and trading date.
 - Index-relative strength is a benchmark comparison, not an attribution model.
+- Technical scores are rules-based research helpers from public OHLCV data; do not present them as trading signals or investment advice.
 - Show price and trading details as dated data: open/high/low/close, turnover, volume, 5/20-day returns, period high/low, and average turnover.
 - Show dividend records and Stock Connect eligibility as factual fields from the upstream source.
 - For Hong Kong stocks, prioritize liquidity, southbound flow, announcements, valuation, dividend/buyback activity, and China macro sensitivity.
