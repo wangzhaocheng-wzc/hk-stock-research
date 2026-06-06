@@ -2,6 +2,18 @@
 
 用于 OpenClaw / Codex 的港股资讯研究 skill。它可以根据一只或多只港股代码，收集并整理行情、估值、财务、分红、新闻、港交所公告、南向资金和南向持仓等信息，并输出带来源说明的 Markdown 报告。
 
+## OpenClaw 使用手册
+
+初学者请优先阅读：[hk-stock-research OpenClaw 使用手册](docs/openclaw-usage.md)。
+
+手册包含：
+
+- 安装到 OpenClaw。
+- 检查 skill 是否可用。
+- 在飞书/OpenClaw 里如何提问。
+- 如何创建股票池。
+- 如何添加、查看、测试和删除定时任务。
+
 ## 能做什么
 
 - 查询单只港股资讯，例如 `00700` 腾讯控股。
